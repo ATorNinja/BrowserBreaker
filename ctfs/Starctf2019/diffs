@@ -1,0 +1,164 @@
+diff --git a/src/builtins/builtins-array.cc b/src/builtins/builtins-array.cc
+index 52bee85b8f..e1a36fae06 100644
+--- a/src/builtins/builtins-array.cc
++++ b/src/builtins/builtins-array.cc
+@@ -363,6 +363,36 @@ V8_WARN_UNUSED_RESULT Object GenericArrayPush(Isolate* isolate,
+ }
+ }  // namespace
+ 
++BUILTIN(ArrayOob){
++
++  uint32_t len = args.length();
++  if (len > 2) return ReadOnlyRoots(isolate).undefined_value();
++  Handle<JSReceiver> receiver;
++  ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++    isolate, 
++    receiver,
++    Object::ToObject(isolate, args.receiver())
++  );
++  Handle<JSArray> array = Handle<JSArray>::cast(receiver);
++  FixedDoubleArray elements = FixedDoubleArray::cast(array->elements());
++  uint32_t length = static_cast<uint32_t>(array->length().Number());
++  if (len == 1){
++    // oob read
++    return *(isolate->factory()->NewNumber(elements.get_scalar(length)));
++  }else{
++    // oob write?
++    Handle<Object> value;
++    ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
++      isolate,
++      value,
++      Object::ToNumber(isolate, args.at<Object>(1))
++    );
++    elements.set(length, value->Number());
++    return ReadOnlyRoots(isolate).undefined_value();
++  }
++}
++
++
+ BUILTIN(ArrayPush) {
+   HandleScope scope(isolate);
+   Handle<Object> receiver = args.receiver();
+diff --git a/src/builtins/builtins-definitions.h b/src/builtins/builtins-definitions.h
+index 6803ae53b1..19b6497ef3 100644
+--- a/src/builtins/builtins-definitions.h
++++ b/src/builtins/builtins-definitions.h
+@@ -363,7 +363,7 @@ namespace internal {
+   TFJ(ArrayPrototypeFlat, SharedFunctionInfo::kDontAdaptArgumentsSentinel)     \
+   /* https://tc39.github.io/proposal-flatMap/#sec-Array.prototype.flatMap */   \
+   TFJ(ArrayPrototypeFlatMap, SharedFunctionInfo::kDontAdaptArgumentsSentinel)  \
+-                                                                               \
++  CPP(ArrayOob)                                                                             \
+   /* ArrayBuffer */                                                            \
+   /* ES #sec-arraybuffer-constructor */                                        \
+   CPP(ArrayBufferConstructor)                                                  \
+diff --git a/src/compiler/typer.cc b/src/compiler/typer.cc
+index b3d7d4970a..741e0a6bed 100644
+--- a/src/compiler/typer.cc
++++ b/src/compiler/typer.cc
+@@ -1729,6 +1729,8 @@ Type Typer::Visitor::JSCallTyper(Type fun, Typer* t) {
+       return Type::Receiver();
+     case Builtins::kArrayUnshift:
+       return t->cache_->kPositiveSafeInteger;
++    case Builtins::kArrayOob:
++      return Type::Receiver();
+ 
+     // ArrayBuffer functions.
+     case Builtins::kArrayBufferIsView:
+diff --git a/src/init/bootstrapper.cc b/src/init/bootstrapper.cc
+index bc11e06195..abc81c9ab2 100644
+--- a/src/init/bootstrapper.cc
++++ b/src/init/bootstrapper.cc
+@@ -1493,6 +1493,7 @@ void Genesis::InitializeGlobal(Handle<JSGlobalObject> global_object,
+     SimpleInstallFunction(isolate_, object_function, "seal",
+                           Builtins::kObjectSeal, 1, false);
+ 
++
+     Handle<JSFunction> object_create = SimpleInstallFunction(
+         isolate_, object_function, "create", Builtins::kObjectCreate, 2, false);
+     native_context()->set_object_create(*object_create);
+@@ -1724,6 +1725,8 @@ void Genesis::InitializeGlobal(Handle<JSGlobalObject> global_object,
+                           Builtins::kArrayPrototypeFill, 1, false);
+     SimpleInstallFunction(isolate_, proto, "find",
+                           Builtins::kArrayPrototypeFind, 1, false);
++    SimpleInstallFunction(isolate_, proto, "oob", 
++                          Builtins::kArrayOob, 2, false);
+     SimpleInstallFunction(isolate_, proto, "findIndex",
+                           Builtins::kArrayPrototypeFindIndex, 1, false);
+     SimpleInstallFunction(isolate_, proto, "lastIndexOf",
+diff --git a/src/objects/fixed-array-inl.h b/src/objects/fixed-array-inl.h
+index 9701f8ef09..f2fbd552f1 100644
+--- a/src/objects/fixed-array-inl.h
++++ b/src/objects/fixed-array-inl.h
+@@ -318,7 +318,7 @@ int Search(T* array, Name name, int valid_entries, int* out_insertion_index) {
+ double FixedDoubleArray::get_scalar(int index) {
+   DCHECK(map() != GetReadOnlyRoots().fixed_cow_array_map() &&
+          map() != GetReadOnlyRoots().fixed_array_map());
+-  DCHECK(index >= 0 && index < this->length());
++  // // DCHECK(index >= 0 && index < this->length());()); // disable get_scalar boundary check.
+   DCHECK(!is_the_hole(index));
+   return ReadField<double>(kHeaderSize + index * kDoubleSize);
+ }
+@@ -326,7 +326,7 @@ double FixedDoubleArray::get_scalar(int index) {
+ uint64_t FixedDoubleArray::get_representation(int index) {
+   DCHECK(map() != GetReadOnlyRoots().fixed_cow_array_map() &&
+          map() != GetReadOnlyRoots().fixed_array_map());
+-  DCHECK(index >= 0 && index < this->length());
++  // // DCHECK(index >= 0 && index < this->length());());
+   int offset = kHeaderSize + index * kDoubleSize;
+   // Bug(v8:8875): Doubles may be unaligned.
+   return base::ReadUnalignedValue<uint64_t>(field_address(offset));
+@@ -517,12 +517,12 @@ void ArrayList::Clear(int index, Object undefined) {
+ int ByteArray::Size() { return RoundUp(length() + kHeaderSize, kTaggedSize); }
+ 
+ byte ByteArray::get(int index) const {
+-  DCHECK(index >= 0 && index < this->length());
++  // // DCHECK(index >= 0 && index < this->length());());
+   return ReadField<byte>(kHeaderSize + index * kCharSize);
+ }
+ 
+ void ByteArray::set(int index, byte value) {
+-  DCHECK(index >= 0 && index < this->length());
++  // // DCHECK(index >= 0 && index < this->length());());
+   WriteField<byte>(kHeaderSize + index * kCharSize, value);
+ }
+ 
+@@ -541,32 +541,32 @@ void ByteArray::copy_out(int index, byte* buffer, int length) {
+ }
+ 
+ int ByteArray::get_int(int index) const {
+-  DCHECK(index >= 0 && index < this->length() / kIntSize);
++  // DCHECK(index >= 0 && index < this->length());() / kIntSize);
+   return ReadField<int>(kHeaderSize + index * kIntSize);
+ }
+ 
+ void ByteArray::set_int(int index, int value) {
+-  DCHECK(index >= 0 && index < this->length() / kIntSize);
++  // DCHECK(index >= 0 && index < this->length());() / kIntSize);
+   WriteField<int>(kHeaderSize + index * kIntSize, value);
+ }
+ 
+ uint32_t ByteArray::get_uint32(int index) const {
+-  DCHECK(index >= 0 && index < this->length() / kUInt32Size);
++  // DCHECK(index >= 0 && index < this->length());() / kUInt32Size);
+   return ReadField<uint32_t>(kHeaderSize + index * kUInt32Size);
+ }
+ 
+ void ByteArray::set_uint32(int index, uint32_t value) {
+-  DCHECK(index >= 0 && index < this->length() / kUInt32Size);
++  // DCHECK(index >= 0 && index < this->length());() / kUInt32Size);
+   WriteField<uint32_t>(kHeaderSize + index * kUInt32Size, value);
+ }
+ 
+ uint32_t ByteArray::get_uint32_relaxed(int index) const {
+-  DCHECK(index >= 0 && index < this->length() / kUInt32Size);
++  // DCHECK(index >= 0 && index < this->length());() / kUInt32Size);
+   return RELAXED_READ_UINT32_FIELD(*this, kHeaderSize + index * kUInt32Size);
+ }
+ 
+ void ByteArray::set_uint32_relaxed(int index, uint32_t value) {
+-  DCHECK(index >= 0 && index < this->length() / kUInt32Size);
++  // DCHECK(index >= 0 && index < this->length());() / kUInt32Size);
+   RELAXED_WRITE_UINT32_FIELD(*this, kHeaderSize + index * kUInt32Size, value);
+ }
+ 
